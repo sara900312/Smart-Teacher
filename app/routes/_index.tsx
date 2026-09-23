@@ -395,6 +395,8 @@ export default function HomeRoute() {
   const voiceObjectUrlRef = useRef<string | null>(null);
   const voiceRunIdRef = useRef(0);
   const teacherMarkdownRef = useRef<HTMLDivElement | null>(null);
+  const voiceHighlightLayerRef = useRef<HTMLDivElement | null>(null);
+  const voiceHighlightRangeRef = useRef<Range | null>(null);
   const voiceAbortControllerRef = useRef<AbortController | null>(null);
   const voicePlaybackCancelRef = useRef<(() => void) | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -613,16 +615,26 @@ export default function HomeRoute() {
   const normalizeComparableText = (value: string) => normalizeVoiceChars(value).text;
 
   const clearVoiceHighlight = useCallback(() => {
-    const root = teacherMarkdownRef.current;
-    if (!root) return;
-    const highlights = root.querySelectorAll(".teacher-voice-highlight, .voice-highlight");
-    if (highlights.length) console.log("[voice-sync] HIGHLIGHT REMOVED");
-    highlights.forEach((highlight) => {
-      const parent = highlight.parentNode;
-      if (!parent) return;
-      while (highlight.firstChild) parent.insertBefore(highlight.firstChild, highlight);
-      parent.removeChild(highlight);
-      parent.normalize();
+    voiceHighlightRangeRef.current = null;
+    voiceHighlightLayerRef.current?.replaceChildren();
+  }, []);
+
+  const renderVoiceOverlayRects = useCallback(() => {
+    const layer = voiceHighlightLayerRef.current;
+    const range = voiceHighlightRangeRef.current;
+    if (!layer || !range) return;
+
+    layer.replaceChildren();
+    const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+    rects.forEach((rect) => {
+      const highlight = document.createElement("div");
+      highlight.className = "teacher-voice-overlay";
+      highlight.style.top = `${rect.top}px`;
+      highlight.style.left = `${rect.left}px`;
+      highlight.style.width = `${rect.width}px`;
+      highlight.style.height = `${rect.height}px`;
+      highlight.style.setProperty("--voice-level", String(voiceLevelRef.current));
+      layer.appendChild(highlight);
     });
   }, []);
 
@@ -675,30 +687,30 @@ export default function HomeRoute() {
     const range = document.createRange();
     range.setStart(startPoint.node, startPoint.offset);
     range.setEnd(endPoint.node, endPoint.offset + 1);
-    const highlight = document.createElement("span");
-    highlight.className = "teacher-voice-highlight";
-    const highlightedContent = range.extractContents();
-    highlight.appendChild(highlightedContent);
-    range.insertNode(highlight);
-    console.log("[voice-sync] HIGHLIGHT APPLIED", {
+    voiceHighlightRangeRef.current = range;
+    renderVoiceOverlayRects();
+
+    const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+    console.log("[voice-sync] HIGHLIGHT SEGMENT", {
       segmentIndex: segment.segment_index,
       text: segment.text.slice(0, 100),
+      rectCount: rects.length,
     });
 
-    const rect = range.getBoundingClientRect();
-    const scrollContainer = root.closest<HTMLElement>(".messages-area");
+    const firstRect = rects[0];
+    const scrollContainer = root.closest<HTMLElement>(".messages-area, .study-content");
     const containerRect = scrollContainer?.getBoundingClientRect();
-    if (scrollContainer && containerRect && (rect.top < containerRect.top || rect.bottom > containerRect.bottom)) {
-      highlight.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (firstRect && scrollContainer && containerRect && (firstRect.top < containerRect.top || firstRect.bottom > containerRect.bottom)) {
+      startPoint.node.parentElement?.scrollIntoView({ behavior: "smooth", block: "center" });
     }
-  }, [clearVoiceHighlight]);
+  }, [clearVoiceHighlight, renderVoiceOverlayRects]);
 
   const setVoiceLevel = useCallback((level: number) => {
     const normalizedLevel = Math.min(1, Math.max(0, level));
     voiceLevelRef.current = normalizedLevel;
-    const root = teacherMarkdownRef.current;
-    if (!root) return;
-    root.querySelectorAll<HTMLElement>(".teacher-voice-highlight").forEach((highlight) => {
+    const layer = voiceHighlightLayerRef.current;
+    if (!layer) return;
+    layer.querySelectorAll<HTMLElement>(".teacher-voice-overlay").forEach((highlight) => {
       highlight.style.setProperty("--voice-level", String(normalizedLevel));
     });
   }, []);
@@ -764,7 +776,7 @@ export default function HomeRoute() {
       setVoiceLevel(level);
       if (timestamp - analyserLastLogRef.current > 400) {
         analyserLastLogRef.current = timestamp;
-        console.log("[voice-sync] ANALYSER LEVEL", { level: Number(level.toFixed(3)) });
+        console.log("[voice-sync] ANALYSER VALUE", { level: Number(level.toFixed(3)), segmentIndex: voiceIndexRef.current });
       }
       analyserFrameRef.current = requestAnimationFrame(readLevel);
     };
@@ -1170,7 +1182,21 @@ export default function HomeRoute() {
     }
     const segment = voiceSegmentsRef.current.find((item) => item.segment_index === activeVoiceSegment);
     if (segment) highlightVoiceSegment(segment);
-  }, [activeVoiceSegment, clearVoiceHighlight, highlightVoiceSegment]);
+  }, [activeVoiceSegment, clearVoiceHighlight, highlightVoiceSegment, voiceContentTarget]);
+
+  useEffect(() => {
+    const root = teacherMarkdownRef.current;
+    const scrollContainer = root?.closest<HTMLElement>(".messages-area, .study-content");
+    if (!root || !scrollContainer) return;
+
+    const reposition = () => renderVoiceOverlayRects();
+    window.addEventListener("resize", reposition);
+    scrollContainer.addEventListener("scroll", reposition, { passive: true });
+    return () => {
+      window.removeEventListener("resize", reposition);
+      scrollContainer.removeEventListener("scroll", reposition);
+    };
+  }, [activeVoiceSegment, renderVoiceOverlayRects, voiceContentTarget]);
 
   useEffect(() => {
     return () => {
@@ -1184,6 +1210,7 @@ export default function HomeRoute() {
         void audioContextRef.current.close();
         audioContextRef.current = null;
       }
+      voiceHighlightLayerRef.current?.replaceChildren();
     };
   }, [stopAnalyser, stopTeacherVoice]);
 
@@ -1558,6 +1585,7 @@ export default function HomeRoute() {
           <section ref={chatPanelRef} className="chat-panel">
             <div className="panel-heading"><div><p className="section-kicker">أسئلة خاصة</p><h2>اسأل المدرس</h2></div><div className="voice-controls"><button className={`voice-toggle ${isVoiceEnabled ? "is-active" : ""}`} type="button" onClick={toggleVoice} disabled={!canWork || isVoiceLoading}>{isVoiceEnabled ? "الصوت مفعّل" : "الصوت متوقف"}</button>{isVoicePlaying && <button className="voice-talk" type="button" onClick={pauseVoice}>إيقاف مؤقت</button>}{voiceStatus === "paused" && <button className="voice-talk" type="button" onClick={resumeVoice}>متابعة الصوت</button>}{voiceSegments.length > 0 && !isVoicePlaying && voiceStatus !== "paused" && !isVoiceLoading && <button className="voice-talk" type="button" onClick={replayVoice} disabled={!isVoiceEnabled}>تشغيل الصوت</button>}<span className={`voice-status ${isVoicePlaying ? "voice-status-speaking" : ""}`}>{voiceError || (!isVoiceEnabled ? "الصوت متوقف" : isVoiceLoading ? "جاري تجهيز الصوت..." : voiceStatus === "paused" ? "متوقف" : isVoicePlaying ? "يقرأ الآن" : voiceStatus === "ready" ? "الصوت جاهز" : "بانتظار الإجابة")}</span></div></div>
             <div className="messages-area" aria-live="polite">
+              <div ref={voiceHighlightLayerRef} className="voice-highlight-layer" aria-hidden="true" />
               {!messages.length && <div className="empty-chat"><div className="empty-icon"><IconMessageCircle size={24} /></div><h3>اسأل المدرس عن سؤال خاص</h3><p>{canWork ? "اكتب سؤالًا جديدًا، وسأبحث عن إجابته من محتوى الكتاب." : "اختر كتابًا لتبدأ."}</p></div>}
               {messages.map((message, index) => <article key={`${message.created_at}-${index}`} className={`message ${message.role === "user" ? "user-message" : "assistant-message"}`}><div className="message-avatar">{message.role === "user" ? <IconUser size={16} /> : <IconBook2 size={16} />}</div><div className="message-body"><span className="message-role">{message.role === "user" ? "الطالب" : "المدرس"}</span>{message.role === "assistant" ? <div ref={voiceContentTarget === "chat" ? teacherMarkdownRef : undefined} className="teacher-markdown" onClick={handleTeacherMarkdownClick}><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{renderTeacherMarkdown(message.content)}</ReactMarkdown></div> : <p>{message.content}</p>}{message.sources?.length ? <div className="sources"><span>المصادر</span>{message.sources.map((source, sourceIndex) => <small key={sourceIndex}>صفحة {source.page || source.page_number || "—"}{source.title ? ` · ${source.title}` : ""}</small>)}</div> : null}</div></article>)}
               {isAsking && <div className="thinking"><span className="status-dot" /> المدرس يكتب...</div>}
