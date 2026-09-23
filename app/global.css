@@ -350,25 +350,19 @@
   box-shadow: 0 0 0 1px #d7ebe6;
 }
 .teacher-voice-highlight {
+  --voice-level: 0;
   border-radius: 6px;
   padding-inline: 3px;
   margin-inline: -3px;
-  background: rgba(22, 123, 112, 0.12);
-  box-shadow: 0 0 0 1px rgba(22, 123, 112, 0.18), 0 0 14px rgba(22, 123, 112, 0.10);
-  transition: background 180ms ease, box-shadow 180ms ease;
-  animation: teacherVoicePulse 1.8s ease-in-out infinite;
+  background: rgba(22, 123, 112, calc(0.07 + var(--voice-level) * 0.14));
+  box-shadow:
+    0 0 0 1px rgba(22, 123, 112, calc(0.12 + var(--voice-level) * 0.18)),
+    0 0 calc(8px + var(--voice-level) * 18px) rgba(22, 123, 112, calc(0.05 + var(--voice-level) * 0.12));
+  transition: background 80ms linear, box-shadow 80ms linear;
 }
-@keyframes teacherVoicePulse {
-  0%, 100% {
-    background: rgba(22, 123, 112, 0.08);
-    box-shadow: 0 0 0 1px rgba(22, 123, 112, 0.14), 0 0 8px rgba(22, 123, 112, 0.06);
-  }
-  50% {
-    background: rgba(22, 123, 112, 0.18);
-    box-shadow: 0 0 0 1px rgba(22, 123, 112, 0.24), 0 0 16px rgba(22, 123, 112, 0.14);
-  }
+@media (prefers-reduced-motion: reduce) {
+  .teacher-voice-highlight { transition: none; }
 }
-@media (prefers-reduced-motion: reduce) { .teacher-voice-highlight { animation: none; } }
 .voice-streaming-message { margin: 0 20px 12px; border: 1px solid #d7e8e4; border-radius: 9px; padding: 9px 11px; background: #f6fbf9; }
 .voice-streaming-message > span { display: block; margin-bottom: 4px; color: #167b70; font-size: 10px; font-weight: 700; }
 .voice-streaming-message .teacher-markdown { font-size: 12px; }

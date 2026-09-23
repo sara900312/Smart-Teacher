@@ -397,6 +397,13 @@ export default function HomeRoute() {
   const teacherMarkdownRef = useRef<HTMLDivElement | null>(null);
   const voiceAbortControllerRef = useRef<AbortController | null>(null);
   const voicePlaybackCancelRef = useRef<(() => void) | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const mediaSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const analyserFrameRef = useRef<number | null>(null);
+  const analyserDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const voiceLevelRef = useRef(0);
+  const analyserLastLogRef = useRef(0);
   const isVoiceEnabledRef = useRef(true);
   const isAskingRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -686,6 +693,84 @@ export default function HomeRoute() {
     }
   }, [clearVoiceHighlight]);
 
+  const setVoiceLevel = useCallback((level: number) => {
+    const normalizedLevel = Math.min(1, Math.max(0, level));
+    voiceLevelRef.current = normalizedLevel;
+    const root = teacherMarkdownRef.current;
+    if (!root) return;
+    root.querySelectorAll<HTMLElement>(".teacher-voice-highlight").forEach((highlight) => {
+      highlight.style.setProperty("--voice-level", String(normalizedLevel));
+    });
+  }, []);
+
+  const ensureAudioAnalyser = useCallback(() => {
+    const audio = voiceAudioRef.current;
+    if (!audio) return null;
+    if (audioContextRef.current && analyserRef.current && mediaSourceRef.current) {
+      return audioContextRef.current;
+    }
+
+    try {
+      audio.crossOrigin = "anonymous";
+      const AudioContextConstructor = window.AudioContext;
+      if (!AudioContextConstructor) return null;
+
+      const audioContext = audioContextRef.current ?? new AudioContextConstructor();
+      if (!audioContextRef.current) {
+        audioContextRef.current = audioContext;
+        console.log("[voice-sync] AUDIO CONTEXT CREATED");
+      }
+
+      const mediaSource = mediaSourceRef.current ?? audioContext.createMediaElementSource(audio);
+      const analyser = analyserRef.current ?? audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.78;
+      mediaSource.connect(analyser);
+      analyser.connect(audioContext.destination);
+      mediaSourceRef.current = mediaSource;
+      analyserRef.current = analyser;
+      analyserDataRef.current = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
+      console.log("[voice-sync] ANALYSER CONNECTED");
+      return audioContext;
+    } catch (error) {
+      console.error("[voice-sync] ANALYSER CORS ERROR", error);
+      return null;
+    }
+  }, []);
+
+  const stopAnalyser = useCallback(() => {
+    if (analyserFrameRef.current !== null) {
+      cancelAnimationFrame(analyserFrameRef.current);
+      analyserFrameRef.current = null;
+      console.log("[voice-sync] ANALYSER STOP");
+    }
+    setVoiceLevel(0);
+  }, [setVoiceLevel]);
+
+  const startAnalyser = useCallback(() => {
+    const analyser = analyserRef.current;
+    const dataArray = analyserDataRef.current;
+    if (!analyser || !dataArray || analyserFrameRef.current !== null) return;
+
+    console.log("[voice-sync] ANALYSER START");
+    const readLevel = (timestamp: number) => {
+      analyser.getByteTimeDomainData(dataArray);
+      let sumSquares = 0;
+      for (const sample of dataArray) {
+        const centered = (sample - 128) / 128;
+        sumSquares += centered * centered;
+      }
+      const level = Math.min(1, Math.sqrt(sumSquares / dataArray.length) * 2.4);
+      setVoiceLevel(level);
+      if (timestamp - analyserLastLogRef.current > 400) {
+        analyserLastLogRef.current = timestamp;
+        console.log("[voice-sync] ANALYSER LEVEL", { level: Number(level.toFixed(3)) });
+      }
+      analyserFrameRef.current = requestAnimationFrame(readLevel);
+    };
+    analyserFrameRef.current = requestAnimationFrame(readLevel);
+  }, [setVoiceLevel]);
+
   const stopTeacherVoice = useCallback(() => {
     voiceRunIdRef.current += 1;
     voiceAbortControllerRef.current?.abort();
@@ -704,16 +789,27 @@ export default function HomeRoute() {
       voiceObjectUrlRef.current = null;
     }
     voiceIndexRef.current = 0;
+    stopAnalyser();
     setIsVoiceLoading(false);
     setIsVoicePlaying(false);
     setActiveVoiceSegment(null);
     setVoiceStatus(voiceSegmentsRef.current.length ? "ready" : "idle");
     clearVoiceHighlight();
-  }, [clearVoiceHighlight]);
+  }, [clearVoiceHighlight, stopAnalyser]);
 
   const playVoiceSegments = useCallback(async (segments: VoiceSegment[], startIndex = 0) => {
     const audio = voiceAudioRef.current;
     if (!audio || !segments.length) return;
+
+    const audioContext = ensureAudioAnalyser();
+    if (audioContext?.state === "suspended") {
+      try {
+        await audioContext.resume();
+        console.log("[voice-sync] AUDIO CONTEXT RESUMED");
+      } catch (error) {
+        console.warn("[voice-sync] AUDIO CONTEXT RESUME FAILED", error);
+      }
+    }
 
     const runId = ++voiceRunIdRef.current;
     voiceIndexRef.current = startIndex;
@@ -732,6 +828,7 @@ export default function HomeRoute() {
 
         voiceIndexRef.current = index;
         setActiveVoiceSegment(segment.segment_index);
+        setVoiceLevel(0);
         audio.src = segment.audio_url;
         audio.currentTime = 0;
         audio.load();
@@ -767,15 +864,20 @@ export default function HomeRoute() {
           const onPlay = () => {
             setIsVoicePlaying(true);
             setVoiceStatus("playing");
+            startAnalyser();
           };
           const onPause = () => {
             if (!settled) {
               setIsVoicePlaying(false);
               setVoiceStatus("paused");
+              stopAnalyser();
               console.log("[voice-sync] PAUSE", { segmentIndex: segment.segment_index });
             }
           };
-          const onEnded = () => finish(true);
+          const onEnded = () => {
+            stopAnalyser();
+            finish(true);
+          };
           const onError = () => {
             console.error("[voice-sync] AUDIO ERROR", { segmentIndex: segment.segment_index, src: audio.src });
             fail("تعذر تشغيل الصوت.");
@@ -835,7 +937,7 @@ export default function HomeRoute() {
         setVoiceStatus("error");
       }
     }
-  }, [clearVoiceHighlight]);
+  }, [clearVoiceHighlight, ensureAudioAnalyser, setVoiceLevel, startAnalyser, stopAnalyser]);
 
   const generateTeacherVoice = useCallback(async ({
     text,
@@ -1071,8 +1173,19 @@ export default function HomeRoute() {
   }, [activeVoiceSegment, clearVoiceHighlight, highlightVoiceSegment]);
 
   useEffect(() => {
-    return () => stopTeacherVoice();
-  }, [stopTeacherVoice]);
+    return () => {
+      stopTeacherVoice();
+      stopAnalyser();
+      mediaSourceRef.current?.disconnect();
+      analyserRef.current?.disconnect();
+      mediaSourceRef.current = null;
+      analyserRef.current = null;
+      if (audioContextRef.current) {
+        void audioContextRef.current.close();
+        audioContextRef.current = null;
+      }
+    };
+  }, [stopAnalyser, stopTeacherVoice]);
 
   const sendMessage = useCallback(
     async (content: string) => {
