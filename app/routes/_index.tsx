@@ -467,8 +467,7 @@ export default function HomeRoute() {
   }, [selectedSectionId]);
 
   useEffect(() => {
-    const client = supabase;
-    if (!client || !selectedDocumentId || !selectedSectionId) return;
+    if (!supabase || !supabaseUrl || !supabaseKey || !selectedDocumentId || !selectedSectionId) return;
 
     let active = true;
     setIsLoadingStudy(true);
@@ -476,54 +475,70 @@ export default function HomeRoute() {
     setStudyExplanation(null);
     setExplanationCached(false);
     setVoiceCached(false);
-    console.log("[study] LOAD CACHE", { documentId: selectedDocumentId, sectionId: selectedSectionId });
+    console.log("[study] LOAD EXPLANATION", { documentId: selectedDocumentId, sectionId: selectedSectionId });
 
-    void client
-      .from("lesson_explanation_cache")
-      .select("id, answer_markdown, document_id, section_id, status, updated_at")
-      .eq("document_id", selectedDocumentId)
-      .eq("section_id", selectedSectionId)
-      .eq("status", "ready")
-      .order("updated_at", { ascending: false })
-      .limit(1)
-      .maybeSingle()
-      .then(async ({ data, error: queryError }) => {
-        if (!active) return;
-        if (queryError) {
-          console.error("[study] EXPLANATION CACHE ERROR", queryError);
-          setStudyError("تعذر تحميل الشرح المحفوظ لهذا الدرس.");
-          setIsLoadingStudy(false);
-          return;
+    void fetch(`${supabaseUrl}/functions/v1/lesson-explanation`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${supabaseKey}`,
+        apikey: supabaseKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        document_id: selectedDocumentId,
+        section_id: selectedSectionId,
+      }),
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null) as {
+          success?: boolean;
+          cached?: boolean;
+          explanation_cache_id?: string | null;
+          answer?: string | null;
+          answer_hash?: string | null;
+          cache_key?: string | null;
+          source_hash?: string | null;
+          model?: string | null;
+          cache_version?: string | null;
+          source_count?: number | null;
+          created_at?: string | null;
+          updated_at?: string | null;
+          error?: string;
+        } | null;
+
+        if (!response.ok || payload?.success !== true) {
+          throw new Error(payload?.error || `HTTP ${response.status}`);
         }
-        if (!data?.answer_markdown?.trim()) {
+
+        return payload;
+      })
+      .then((payload) => {
+        if (!active) return;
+        if (!payload?.cached || !payload.answer?.trim() || !payload.explanation_cache_id) {
           console.log("[study] EXPLANATION CACHE MISS", { documentId: selectedDocumentId, sectionId: selectedSectionId });
           setIsLoadingStudy(false);
           return;
         }
 
-        const explanation = data as ExplanationCache;
+        const explanation: ExplanationCache = {
+          id: payload.explanation_cache_id,
+          answer_markdown: payload.answer,
+          document_id: selectedDocumentId,
+          section_id: selectedSectionId,
+          status: "ready",
+          updated_at: payload.updated_at,
+        };
+
         console.log("[study] EXPLANATION CACHE HIT", { explanationCacheId: explanation.id });
+        console.log("[study] EXPLANATION CACHE ID", explanation.id);
         setStudyExplanation(explanation);
         setExplanationCached(true);
-
-        const { data: voiceData, error: voiceError } = await client
-          .from("lesson_voice_cache")
-          .select("id")
-          .eq("explanation_cache_id", explanation.id)
-          .eq("status", "ready")
-          .eq("mode", "sync")
-          .limit(1)
-          .maybeSingle();
-
+        setIsLoadingStudy(false);
+      })
+      .catch((requestError: unknown) => {
         if (!active) return;
-        if (voiceError) {
-          console.warn("[study] VOICE CACHE LOOKUP ERROR", voiceError);
-        } else if (voiceData) {
-          console.log("[study] VOICE CACHE HIT", { explanationCacheId: explanation.id });
-          setVoiceCached(true);
-        } else {
-          console.log("[study] VOICE CACHE MISS", { explanationCacheId: explanation.id });
-        }
+        console.error("[study] EXPLANATION CACHE ERROR", requestError);
+        setStudyError("تعذر تحميل الشرح المحفوظ لهذا الدرس.");
         setIsLoadingStudy(false);
       });
 
