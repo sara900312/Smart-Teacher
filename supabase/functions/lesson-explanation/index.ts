@@ -71,14 +71,96 @@ Deno.serve(async (req: Request) => {
 
   try {
     const body = await req.json() as {
+      action?: unknown;
       document_id?: unknown;
       section_id?: unknown;
     };
+
+    const action = readString(body.action) || "get";
+    if (action === "list") {
+      console.log("[lesson-explanation] LIST REQUEST");
+
+      const { data: cacheRows, error: cacheError } = await supabase
+        .from("lesson_explanation_cache")
+        .select(
+          "id, document_id, section_id, answer_hash, model, cache_version, source_count, created_at, updated_at, status",
+        )
+        .eq("status", "ready")
+        .order("updated_at", { ascending: false });
+
+      if (cacheError) {
+        console.error("[lesson-explanation] LIST QUERY ERROR", cacheError.message);
+        return jsonResponse(
+          { success: false, error: "تعذر تحميل المواد المحفوظة." },
+          500,
+        );
+      }
+
+      const rows = cacheRows ?? [];
+      const documentIds = [...new Set(rows.map((row) => row.document_id).filter(Boolean))];
+      const sectionIds = [...new Set(rows.map((row) => row.section_id).filter(Boolean))];
+
+      const explanationIds = rows.map((row) => row.id).filter(Boolean);
+      const [{ data: documents, error: documentsError }, { data: sections, error: sectionsError }, { data: voiceRows, error: voiceError }] = await Promise.all([
+        documentIds.length
+          ? supabase.from("knowledge_documents").select("id, title").in("id", documentIds)
+          : Promise.resolve({ data: [], error: null }),
+        sectionIds.length
+          ? supabase.from("knowledge_sections").select("id, title, lesson_number, chapter_number").in("id", sectionIds)
+          : Promise.resolve({ data: [], error: null }),
+        explanationIds.length
+          ? supabase.from("lesson_voice_cache").select("explanation_cache_id").in("explanation_cache_id", explanationIds).eq("status", "ready").eq("mode", "sync")
+          : Promise.resolve({ data: [], error: null }),
+      ]);
+
+      if (documentsError || sectionsError || voiceError) {
+        console.error("[lesson-explanation] LIST CONTEXT ERROR", {
+          documentsError: documentsError?.message,
+          sectionsError: sectionsError?.message,
+          voiceError: voiceError?.message,
+        });
+        return jsonResponse(
+          { success: false, error: "تعذر تحميل تفاصيل المواد المحفوظة." },
+          500,
+        );
+      }
+
+      const documentMap = new Map((documents ?? []).map((document) => [document.id, document]));
+      const sectionMap = new Map((sections ?? []).map((section) => [section.id, section]));
+      const voiceIds = new Set((voiceRows ?? []).map((voiceRow) => voiceRow.explanation_cache_id));
+      const materials = rows.map((row) => ({
+        id: row.id,
+        document_id: row.document_id,
+        section_id: row.section_id,
+        answer_hash: row.answer_hash,
+        model: row.model,
+        cache_version: row.cache_version,
+        source_count: row.source_count,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        document_title: documentMap.get(row.document_id)?.title ?? null,
+        section_title: sectionMap.get(row.section_id)?.title ?? null,
+        lesson_number: sectionMap.get(row.section_id)?.lesson_number ?? null,
+        chapter_number: sectionMap.get(row.section_id)?.chapter_number ?? null,
+        voice_cached: voiceIds.has(row.id),
+      }));
+
+      console.log("[lesson-explanation] LIST RESPONSE", { count: materials.length });
+      return jsonResponse({ success: true, cached: true, materials });
+    }
+
+    if (action !== "get") {
+      return jsonResponse(
+        { success: false, error: "Unsupported action" },
+        400,
+      );
+    }
 
     const documentId = readString(body.document_id);
     const sectionId = readString(body.section_id);
 
     console.log("[lesson-explanation] REQUEST", {
+      action,
       documentId,
       sectionId,
     });

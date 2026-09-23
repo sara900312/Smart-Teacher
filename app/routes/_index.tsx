@@ -13,6 +13,7 @@ type Book = { id: string; title: string; processing_status: string; page_count: 
 type Section = { id: string; document_id: string; title: string; section_type: string | null; chapter_number: number | null; lesson_number: number | null; page_start: number | null; page_end: number | null; summary: string | null };
 type KnowledgeRecord = { id: string; section_id: string; page_start?: number | null; chunk_index?: number | null; content?: string | null };
 type ExplanationCache = { id: string; answer_markdown: string; document_id: string; section_id: string; status: string; updated_at?: string | null };
+type SavedLesson = { id: string; document_id: string; section_id: string; document_title: string | null; section_title: string | null; lesson_number: number | null; chapter_number: number | null; updated_at: string | null; source_count: number | null; cache_version: string | null; voice_cached?: boolean };
 type VoiceSegment = {
   id?: string;
   segment_index: number;
@@ -350,6 +351,12 @@ export default function HomeRoute() {
   const [sections, setSections] = useState<Section[]>([]);
   const [selectedDocumentId, setSelectedDocumentId] = useState("");
   const [selectedSectionId, setSelectedSectionId] = useState("");
+  const [studyMode, setStudyMode] = useState<"new" | "saved">("new");
+  const [savedLessons, setSavedLessons] = useState<SavedLesson[]>([]);
+  const [savedLessonsLoaded, setSavedLessonsLoaded] = useState(false);
+  const [isLoadingSavedLessons, setIsLoadingSavedLessons] = useState(false);
+  const [savedLessonsError, setSavedLessonsError] = useState("");
+  const [savedLessonsSearch, setSavedLessonsSearch] = useState("");
   const [topic, setTopic] = useState("");
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -394,6 +401,38 @@ export default function HomeRoute() {
   const isAskingRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
 
+  const loadSavedLessons = useCallback(async (force = false) => {
+    if (!supabase || !supabaseUrl || !supabaseKey || (savedLessonsLoaded && !force)) return;
+
+    setIsLoadingSavedLessons(true);
+    setSavedLessonsError("");
+    console.log("[study] LOAD SAVED MATERIALS");
+
+    try {
+      const response = await fetch(`${supabaseUrl}/functions/v1/lesson-explanation`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${supabaseKey}`,
+          apikey: supabaseKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ action: "list" }),
+      });
+      const payload = await response.json().catch(() => null) as { success?: boolean; materials?: SavedLesson[]; error?: string } | null;
+      if (!response.ok || payload?.success !== true) throw new Error(payload?.error || `HTTP ${response.status}`);
+
+      const materials = [...(payload.materials ?? [])].sort((a, b) => (Date.parse(b.updated_at || "") || 0) - (Date.parse(a.updated_at || "") || 0));
+      setSavedLessons(materials);
+      setSavedLessonsLoaded(true);
+      console.log("[study] SAVED MATERIALS LOADED", { count: materials.length });
+    } catch (requestError) {
+      console.error("[study] SAVED MATERIALS ERROR", requestError);
+      setSavedLessonsError("تعذر تحميل المواد المحفوظة.");
+    } finally {
+      setIsLoadingSavedLessons(false);
+    }
+  }, [savedLessonsLoaded]);
+
   const loadBooks = useCallback(async () => {
     if (!supabase) { setIsLoadingBooks(false); return; }
     setIsLoadingBooks(true);
@@ -421,6 +460,15 @@ export default function HomeRoute() {
       if (email) setUserLabel(email.split("@")[0]);
     });
   }, [loadBooks]);
+
+  useEffect(() => {
+    if (studyMode === "saved") {
+      console.log("[study] MODE SAVED");
+      void loadSavedLessons();
+    } else {
+      console.log("[study] MODE NEW");
+    }
+  }, [loadSavedLessons, studyMode]);
 
   useEffect(() => {
     if (!supabase || !selectedDocumentId) { setSections([]); setItems([]); setChunks([]); return; }
@@ -549,6 +597,11 @@ export default function HomeRoute() {
 
   const selectedBook = useMemo(() => books.find((book) => book.id === selectedDocumentId), [books, selectedDocumentId]);
   const selectedSection = useMemo(() => sections.find((section) => section.id === selectedSectionId), [sections, selectedSectionId]);
+  const filteredSavedLessons = useMemo(() => {
+    const query = savedLessonsSearch.trim().toLocaleLowerCase();
+    if (!query) return savedLessons;
+    return savedLessons.filter((lesson) => [lesson.document_title, lesson.section_title, lesson.lesson_number == null ? "" : String(lesson.lesson_number)].join(" ").toLocaleLowerCase().includes(query));
+  }, [savedLessons, savedLessonsSearch]);
 
   const normalizeComparableText = (value: string) => normalizeVoiceChars(value).text;
 
@@ -934,6 +987,18 @@ export default function HomeRoute() {
     setVoiceStatus("idle");
     setVoiceError("");
   }, [stopTeacherVoice]);
+
+  const openSavedLesson = useCallback((lesson: SavedLesson) => {
+    console.log("[study] SAVED MATERIAL SELECTED", { explanationCacheId: lesson.id, documentId: lesson.document_id, sectionId: lesson.section_id });
+    setStudyMode("saved");
+    setSelectedDocumentId(lesson.document_id);
+    setSelectedSectionId(lesson.section_id);
+    setTopic("");
+    setMessages([]);
+    setConversationId(null);
+    clearVoiceContext();
+    console.log("[study] OPEN SAVED LESSON", { explanationCacheId: lesson.id });
+  }, [clearVoiceContext]);
 
   const toggleVoice = useCallback(() => {
     if (isVoiceEnabled) {
@@ -1352,11 +1417,19 @@ export default function HomeRoute() {
           <button className="quiet-button" type="button" onClick={() => { clearVoiceContext(); setMessages([]); setConversationId(null); }}><IconRefresh size={16} /> محادثة جديدة</button>
         </section>
 
-        <section className="control-panel" aria-label="اختيار المادة">
+        <div className="study-mode-tabs" role="tablist" aria-label="وضع الدراسة">
+          <button className={studyMode === "new" ? "is-active" : ""} type="button" role="tab" aria-selected={studyMode === "new"} onClick={() => setStudyMode("new")}>درس جديد</button>
+          <button className={studyMode === "saved" ? "is-active" : ""} type="button" role="tab" aria-selected={studyMode === "saved"} onClick={() => setStudyMode("saved")}>المواد المحفوظة</button>
+        </div>
+
+        {studyMode === "new" ? <section className="control-panel" aria-label="اختيار المادة">
           <div className="control-field wide"><label htmlFor="book">الكتاب</label><div className="select-wrap"><select id="book" value={selectedDocumentId} onChange={(event) => { setSelectedDocumentId(event.target.value); clearVoiceContext(); }}><option value="">{isLoadingBooks ? "جاري تحميل الكتب..." : booksError ? "تعذر تحميل الكتب" : books.length ? "اختر كتابًا" : "لم تُرجع صلاحية المستخدم كتبًا معالجة"}</option>{books.map((book) => <option key={book.id} value={book.id}>{book.title} · {book.metadata?.grade || book.metadata?.stage || ""}</option>)}</select><IconChevronDown size={17} /></div></div>
           <div className="control-field"><label htmlFor="section">الدرس</label><div className="select-wrap"><select id="section" value={selectedSectionId} disabled={!selectedDocumentId || isLoadingSections} onChange={(event) => { setSelectedSectionId(event.target.value); clearVoiceContext(); }}><option value="">{isLoadingSections ? "جاري تحميل الدروس..." : sectionsError ? "تعذر تحميل الدروس" : sections.length ? "اختر درسًا" : "لم تُرجع صلاحية المستخدم دروسًا لهذا الكتاب"}</option>{sections.map((section) => <option key={section.id} value={section.id}>{section.title}</option>)}</select><IconChevronDown size={17} /></div></div>
           <div className="control-field topic-field"><label htmlFor="topic">الموضوع</label><input id="topic" value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="ماذا تريد أن تتعلم؟" /><button className="topic-action" type="button" disabled={!canWork || !selectedSectionId || !topic.trim() || isAsking || explanationCached} onClick={explainTopic}><IconMessageCircle size={17} /> {explanationCached ? "الشرح محفوظ" : "اشرح لي هذا الموضوع"}</button></div>
-        </section>
+        </section> : <section className="saved-materials-panel" aria-labelledby="saved-materials-heading">
+          <div className="saved-materials-header"><div><p className="section-kicker">مكتبتك</p><h2 id="saved-materials-heading">المواد المحفوظة</h2></div><input value={savedLessonsSearch} onChange={(event) => setSavedLessonsSearch(event.target.value)} placeholder="ابحث في الكتاب أو الدرس..." aria-label="البحث في المواد المحفوظة" /></div>
+          {isLoadingSavedLessons ? <div className="saved-empty">جاري تحميل المواد المحفوظة...</div> : savedLessonsError ? <div className="saved-empty error-text"><p>{savedLessonsError}</p><button className="lesson-button" type="button" onClick={() => void loadSavedLessons(true)}>إعادة المحاولة</button></div> : !filteredSavedLessons.length ? <div className="saved-empty"><p>لا توجد مواد محفوظة بعد</p><small>أنشئ أول شرح من قسم درس جديد.</small><button className="lesson-button" type="button" onClick={() => setStudyMode("new")}>إنشاء شرح جديد</button></div> : <div className="saved-materials-list">{filteredSavedLessons.map((lesson) => <article className="saved-material-card" key={lesson.id}><div><h3>{lesson.section_title || "درس محفوظ"}</h3><p>{lesson.document_title || "كتاب تعليمي"}{lesson.lesson_number != null ? ` · الدرس ${lesson.lesson_number}` : ""}</p><div className="saved-material-meta"><span>شرح محفوظ</span>{lesson.voice_cached && <span>صوت جاهز</span>}{lesson.updated_at && <time dateTime={lesson.updated_at}>{new Date(lesson.updated_at).toLocaleDateString("ar")}</time>}</div></div><button className="lesson-button" type="button" onClick={() => openSavedLesson(lesson)}>فتح الدرس</button></article>)}</div>}
+        </section>}
 
         {selectedBook && <div className="book-context"><IconFileText size={16} /><span>{selectedBook.title}</span><span className="context-separator">/</span><span>{selectedBook.metadata?.subject || "مادة تعليمية"}</span>{selectedSection && <><span className="context-separator">/</span><span>{selectedSection.title}</span></>}</div>}
         {(error || booksError || sectionsError || knowledgeError) && <div className="error-banner" role="alert">{error || booksError || sectionsError || knowledgeError}<button type="button" onClick={() => { setError(""); setBooksError(""); setSectionsError(""); setKnowledgeError(""); }}>إغلاق</button></div>}
