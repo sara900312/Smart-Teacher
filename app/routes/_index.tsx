@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, MouseEvent } from "react";
 import { supabase, supabaseKey, supabaseUrl } from "@/lib/supabase";
 
 type Metadata = { subject?: string; grade?: string; stage?: string; processing_error?: string };
@@ -32,6 +32,9 @@ type Message = {
   voice_ready?: boolean;
   voice_loading?: boolean;
   voice_playing?: boolean;
+  explanation_cache_id?: string | null;
+  explanation_cached?: boolean;
+  voice_cached?: boolean;
 };
 type Source = { page?: number; page_number?: number; title?: string; content?: string };
 
@@ -47,8 +50,9 @@ function renderTeacherMarkdown(content: string) {
 }
 
 function normalizeVoiceChars(value: string) {
-  let text = "";
-  const map: number[] = [];
+  const normalizedCharacters: string[] = [];
+  const sourceOffsets: number[] = [];
+  let pendingSpaceSourceOffset: number | null = null;
   let previousWasSpace = false;
 
   for (let index = 0; index < value.length; index += 1) {
@@ -61,21 +65,31 @@ function normalizeVoiceChars(value: string) {
       .toLocaleLowerCase();
 
     if (/\s/.test(original)) {
-      if (!previousWasSpace && text) {
-        text += " ";
-        map.push(index);
+      if (normalizedCharacters.length > 0 && !previousWasSpace) {
+        pendingSpaceSourceOffset = index;
       }
       previousWasSpace = true;
       continue;
     }
 
+    if (pendingSpaceSourceOffset !== null) {
+      normalizedCharacters.push(" ");
+      sourceOffsets.push(pendingSpaceSourceOffset);
+      pendingSpaceSourceOffset = null;
+    }
+
     previousWasSpace = false;
     if (/[*_`~>#-]/.test(original)) continue;
-    text += normalized;
-    map.push(index);
+    normalizedCharacters.push(normalized);
+    sourceOffsets.push(index);
   }
 
-  return { text: text.trim(), map };
+  while (normalizedCharacters.length > 0 && normalizedCharacters[normalizedCharacters.length - 1] === " ") {
+    normalizedCharacters.pop();
+    sourceOffsets.pop();
+  }
+
+  return { text: normalizedCharacters.join(""), map: sourceOffsets };
 }
 
 type TeacherStreamCallbacks = {
@@ -93,13 +107,15 @@ function extractDeltaFromEvent(
   eventType: string,
   parsed: Record<string, unknown>,
 ): string {
-  if (eventType !== "response.output_text.delta") {
+  const data = isRecord(parsed.data) ? parsed.data : parsed;
+  if (eventType !== "response.output_text.delta" && eventType !== "delta" && eventType !== "message.delta") {
     return "";
   }
-
-  return typeof parsed.delta === "string"
-    ? parsed.delta
-    : "";
+  if (typeof data.delta === "string") return data.delta;
+  if (typeof data.text === "string") return data.text;
+  if (typeof data.content === "string") return data.content;
+  if (typeof data.output_text === "string") return data.output_text;
+  return "";
 }
 
 function extractEventType(
@@ -131,6 +147,22 @@ function extractAssistantMessageId(event: Record<string, unknown>) {
   if (isRecord(event.data)) {
     if (typeof event.data.message_id === "string") return event.data.message_id;
     if (typeof event.data.assistant_message_id === "string") return event.data.assistant_message_id;
+  }
+  return null;
+}
+
+function extractExplanationCacheId(event: Record<string, unknown>): string | null {
+  for (const key of ["explanation_cache_id", "explanationCacheId"]) {
+    if (typeof event[key] === "string" && event[key].trim()) return event[key].trim();
+    if (isRecord(event.data) && typeof event.data[key] === "string" && event.data[key].trim()) return event.data[key].trim();
+  }
+  return null;
+}
+
+function extractBooleanField(event: Record<string, unknown>, keys: string[]): boolean | null {
+  for (const key of keys) {
+    if (typeof event[key] === "boolean") return event[key];
+    if (isRecord(event.data) && typeof event.data[key] === "boolean") return event.data[key];
   }
   return null;
 }
