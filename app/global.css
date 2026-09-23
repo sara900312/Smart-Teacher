@@ -375,6 +375,17 @@
 .question-form button { padding: 0 14px; white-space: nowrap; }
 .question-form button:hover:not(:disabled), .lesson-button:hover:not(:disabled) { background: #11685f; transform: translateY(-1px); }
 .question-form button:disabled, .lesson-button:disabled { cursor: not-allowed; opacity: .48; }
+.study-panel { overflow: hidden; border: 1px solid #dce7e7; border-radius: 13px; background: #ffffff; box-shadow: 0 9px 28px rgba(23, 62, 67, .045); }
+.study-statuses { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+.study-status { border: 1px solid #dce7e7; border-radius: 999px; padding: 5px 9px; color: #71898a; background: #f8fbfa; font-size: 10px; font-weight: 700; }
+.study-status.is-ready { border-color: #b9ded5; color: #167b70; background: #edf8f4; }
+.study-content { max-height: 620px; overflow-y: auto; padding: 25px clamp(18px, 4vw, 42px); }
+.study-content .teacher-markdown { max-width: 850px; margin: 0 auto; }
+.study-empty { display: flex; min-height: 150px; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: #71898a; text-align: center; }
+.study-empty svg { color: #83aaa4; }
+.study-empty p { margin: 0; color: #456267; font-size: 14px; font-weight: 650; }
+.study-empty small { font-size: 11px; }
+.error-text { color: #a64f4f; }
 .lesson-panel { display: flex; min-height: 474px; flex-direction: column; }
 .lesson-empty { flex: 1; padding: 30px; color: #7a9192; }
 .lesson-empty svg { color: #83aaa4; }

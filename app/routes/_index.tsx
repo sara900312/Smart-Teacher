@@ -12,6 +12,7 @@ type Metadata = { subject?: string; grade?: string; stage?: string; processing_e
 type Book = { id: string; title: string; processing_status: string; page_count: number | null; text_length: number | null; metadata: Metadata | null; created_at: string; updated_at?: string | null };
 type Section = { id: string; document_id: string; title: string; section_type: string | null; chapter_number: number | null; lesson_number: number | null; page_start: number | null; page_end: number | null; summary: string | null };
 type KnowledgeRecord = { id: string; section_id: string; page_start?: number | null; chunk_index?: number | null; content?: string | null };
+type ExplanationCache = { id: string; answer_markdown: string; document_id: string; section_id: string; status: string; updated_at?: string | null };
 type VoiceSegment = {
   id?: string;
   segment_index: number;
@@ -361,6 +362,12 @@ export default function HomeRoute() {
   const [booksError, setBooksError] = useState("");
   const [sectionsError, setSectionsError] = useState("");
   const [knowledgeError, setKnowledgeError] = useState("");
+  const [studyExplanation, setStudyExplanation] = useState<ExplanationCache | null>(null);
+  const [isLoadingStudy, setIsLoadingStudy] = useState(false);
+  const [studyError, setStudyError] = useState("");
+  const [explanationCached, setExplanationCached] = useState(false);
+  const [voiceCached, setVoiceCached] = useState(false);
+  const [voiceContentTarget, setVoiceContentTarget] = useState<"study" | "chat">("chat");
   const [isAsking, setIsAsking] = useState(false);
   const [error, setError] = useState("");
   const [connection, setConnection] = useState<"connected" | "disconnected">(supabase ? "connected" : "disconnected");
@@ -432,7 +439,16 @@ export default function HomeRoute() {
   }, [selectedDocumentId]);
 
   useEffect(() => {
-    if (!supabase || !selectedSectionId) { setItems([]); setChunks([]); return; }
+    if (!supabase || !selectedSectionId) {
+      setItems([]);
+      setChunks([]);
+      setStudyExplanation(null);
+      setExplanationCached(false);
+      setVoiceCached(false);
+      setVoiceContentTarget("chat");
+      setStudyError("");
+      return;
+    }
     setIsLoadingKnowledge(true);
     setKnowledgeError("");
     void Promise.all([
@@ -449,6 +465,72 @@ export default function HomeRoute() {
       setIsLoadingKnowledge(false);
     });
   }, [selectedSectionId]);
+
+  useEffect(() => {
+    const client = supabase;
+    if (!client || !selectedDocumentId || !selectedSectionId) return;
+
+    let active = true;
+    setIsLoadingStudy(true);
+    setStudyError("");
+    setStudyExplanation(null);
+    setExplanationCached(false);
+    setVoiceCached(false);
+    console.log("[study] LOAD CACHE", { documentId: selectedDocumentId, sectionId: selectedSectionId });
+
+    void client
+      .from("lesson_explanation_cache")
+      .select("id, answer_markdown, document_id, section_id, status, updated_at")
+      .eq("document_id", selectedDocumentId)
+      .eq("section_id", selectedSectionId)
+      .eq("status", "ready")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+      .then(async ({ data, error: queryError }) => {
+        if (!active) return;
+        if (queryError) {
+          console.error("[study] EXPLANATION CACHE ERROR", queryError);
+          setStudyError("تعذر تحميل الشرح المحفوظ لهذا الدرس.");
+          setIsLoadingStudy(false);
+          return;
+        }
+        if (!data?.answer_markdown?.trim()) {
+          console.log("[study] EXPLANATION CACHE MISS", { documentId: selectedDocumentId, sectionId: selectedSectionId });
+          setIsLoadingStudy(false);
+          return;
+        }
+
+        const explanation = data as ExplanationCache;
+        console.log("[study] EXPLANATION CACHE HIT", { explanationCacheId: explanation.id });
+        setStudyExplanation(explanation);
+        setExplanationCached(true);
+
+        const { data: voiceData, error: voiceError } = await client
+          .from("lesson_voice_cache")
+          .select("id")
+          .eq("explanation_cache_id", explanation.id)
+          .eq("status", "ready")
+          .eq("mode", "sync")
+          .limit(1)
+          .maybeSingle();
+
+        if (!active) return;
+        if (voiceError) {
+          console.warn("[study] VOICE CACHE LOOKUP ERROR", voiceError);
+        } else if (voiceData) {
+          console.log("[study] VOICE CACHE HIT", { explanationCacheId: explanation.id });
+          setVoiceCached(true);
+        } else {
+          console.log("[study] VOICE CACHE MISS", { explanationCacheId: explanation.id });
+        }
+        setIsLoadingStudy(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [selectedDocumentId, selectedSectionId]);
 
   const selectedBook = useMemo(() => books.find((book) => book.id === selectedDocumentId), [books, selectedDocumentId]);
   const selectedSection = useMemo(() => sections.find((section) => section.id === selectedSectionId), [sections, selectedSectionId]);
@@ -813,6 +895,22 @@ export default function HomeRoute() {
     }
   }, [isVoiceEnabled, playVoiceSegments]);
 
+  const playStudyVoice = useCallback(() => {
+    if (!studyExplanation || !isVoiceEnabled || isVoiceLoading || !selectedDocumentId || !selectedSectionId) return;
+
+    setVoiceContentTarget("study");
+    console.log("[study] LOAD VOICE", { explanationCacheId: studyExplanation.id, cached: voiceCached });
+    void generateTeacherVoice({
+      text: studyExplanation.answer_markdown,
+      documentId: selectedDocumentId,
+      sectionId: selectedSectionId,
+      explanationCacheId: studyExplanation.id,
+      enabled: true,
+    }).then(() => {
+      setVoiceCached(true);
+    });
+  }, [generateTeacherVoice, isVoiceEnabled, isVoiceLoading, selectedDocumentId, selectedSectionId, studyExplanation, voiceCached]);
+
   const clearVoiceContext = useCallback(() => {
     stopTeacherVoice();
     voiceSegmentsRef.current = [];
@@ -1098,6 +1196,17 @@ export default function HomeRoute() {
         }
 
         setConversationId(finalConversationId);
+        if (finalExplanationCacheId) {
+          setStudyExplanation({
+            id: finalExplanationCacheId,
+            answer_markdown: accumulatedText,
+            document_id: selectedDocumentId,
+            section_id: selectedSectionId,
+            status: "ready",
+          });
+          setExplanationCached(true);
+          console.log("[study] EXPLANATION CACHE HIT", { explanationCacheId: finalExplanationCacheId, source: "teacher-chat" });
+        }
         patchAssistant({
           content: accumulatedText,
           sources: finalSources,
@@ -1123,6 +1232,7 @@ export default function HomeRoute() {
           assistantMessageId
         ) {
           try {
+            setVoiceContentTarget("chat");
             console.log("[frontend] CALLING TEACHER VOICE", {
               messageId: assistantMessageId,
               conversationId: finalConversationId,
@@ -1199,7 +1309,7 @@ export default function HomeRoute() {
   }
 
   function explainTopic() {
-    if (!topic.trim() || !selectedDocumentId || !selectedSectionId || isAsking) return;
+    if (!topic.trim() || !selectedDocumentId || !selectedSectionId || isAsking || explanationCached) return;
     const generatedQuestion = `اشرح لي موضوع "${topic.trim()}" من درس "${selectedSection?.title || "الدرس المحدد"}".`;
     void sendMessage(generatedQuestion);
   }
@@ -1230,18 +1340,25 @@ export default function HomeRoute() {
         <section className="control-panel" aria-label="اختيار المادة">
           <div className="control-field wide"><label htmlFor="book">الكتاب</label><div className="select-wrap"><select id="book" value={selectedDocumentId} onChange={(event) => { setSelectedDocumentId(event.target.value); clearVoiceContext(); }}><option value="">{isLoadingBooks ? "جاري تحميل الكتب..." : booksError ? "تعذر تحميل الكتب" : books.length ? "اختر كتابًا" : "لم تُرجع صلاحية المستخدم كتبًا معالجة"}</option>{books.map((book) => <option key={book.id} value={book.id}>{book.title} · {book.metadata?.grade || book.metadata?.stage || ""}</option>)}</select><IconChevronDown size={17} /></div></div>
           <div className="control-field"><label htmlFor="section">الدرس</label><div className="select-wrap"><select id="section" value={selectedSectionId} disabled={!selectedDocumentId || isLoadingSections} onChange={(event) => { setSelectedSectionId(event.target.value); clearVoiceContext(); }}><option value="">{isLoadingSections ? "جاري تحميل الدروس..." : sectionsError ? "تعذر تحميل الدروس" : sections.length ? "اختر درسًا" : "لم تُرجع صلاحية المستخدم دروسًا لهذا الكتاب"}</option>{sections.map((section) => <option key={section.id} value={section.id}>{section.title}</option>)}</select><IconChevronDown size={17} /></div></div>
-          <div className="control-field topic-field"><label htmlFor="topic">الموضوع</label><input id="topic" value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="ماذا تريد أن تتعلم؟" /><button className="topic-action" type="button" disabled={!canWork || !selectedSectionId || !topic.trim() || isAsking} onClick={explainTopic}><IconMessageCircle size={17} /> اشرح لي هذا الموضوع</button></div>
+          <div className="control-field topic-field"><label htmlFor="topic">الموضوع</label><input id="topic" value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="ماذا تريد أن تتعلم؟" /><button className="topic-action" type="button" disabled={!canWork || !selectedSectionId || !topic.trim() || isAsking || explanationCached} onClick={explainTopic}><IconMessageCircle size={17} /> {explanationCached ? "الشرح محفوظ" : "اشرح لي هذا الموضوع"}</button></div>
         </section>
 
         {selectedBook && <div className="book-context"><IconFileText size={16} /><span>{selectedBook.title}</span><span className="context-separator">/</span><span>{selectedBook.metadata?.subject || "مادة تعليمية"}</span>{selectedSection && <><span className="context-separator">/</span><span>{selectedSection.title}</span></>}</div>}
         {(error || booksError || sectionsError || knowledgeError) && <div className="error-banner" role="alert">{error || booksError || sectionsError || knowledgeError}<button type="button" onClick={() => { setError(""); setBooksError(""); setSectionsError(""); setKnowledgeError(""); }}>إغلاق</button></div>}
 
+        <section className="study-panel mt-7" aria-labelledby="study-heading">
+          <div className="panel-heading"><div><p className="section-kicker">المادة الدراسية</p><h2 id="study-heading">الشرح المحفوظ</h2></div><div className="study-statuses"><span className={`study-status ${explanationCached ? "is-ready" : ""}`}>{isLoadingStudy ? "جاري التحميل..." : explanationCached ? "شرح محفوظ" : "لا يوجد شرح محفوظ"}</span>{explanationCached && <><span className="study-status is-ready">{voiceCached ? "الصوت جاهز" : "جاهز للدراسة"}</span><button className="voice-talk" type="button" onClick={playStudyVoice} disabled={!isVoiceEnabled || isVoiceLoading}>{voiceCached ? "تشغيل الصوت المحفوظ" : "تشغيل صوت المادة"}</button></>}</div></div>
+          <div className="study-content">
+            {studyError ? <div className="study-empty error-text">{studyError}</div> : isLoadingStudy ? <div className="study-empty">جاري تحميل المادة الدراسية...</div> : studyExplanation ? <div ref={voiceContentTarget === "study" ? teacherMarkdownRef : undefined} className="teacher-markdown" data-study-explanation="true"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{renderTeacherMarkdown(studyExplanation.answer_markdown)}</ReactMarkdown></div> : <div className="study-empty"><IconFileText size={24} /><p>لا يوجد شرح محفوظ لهذا الدرس.</p><small>يمكنك إنشاء الشرح من حقل الموضوع أعلاه.</small></div>}
+          </div>
+        </section>
+
         <div className="workspace-grid mt-7">
           <section ref={chatPanelRef} className="chat-panel">
-            <div className="panel-heading"><div><p className="section-kicker">جلسة تفاعلية</p><h2>المحادثة</h2></div><div className="voice-controls"><button className={`voice-toggle ${isVoiceEnabled ? "is-active" : ""}`} type="button" onClick={toggleVoice} disabled={!canWork || isVoiceLoading}>{isVoiceEnabled ? "الصوت مفعّل" : "الصوت متوقف"}</button>{isVoicePlaying && <button className="voice-talk" type="button" onClick={pauseVoice}>إيقاف مؤقت</button>}{voiceStatus === "paused" && <button className="voice-talk" type="button" onClick={resumeVoice}>متابعة الصوت</button>}{voiceSegments.length > 0 && !isVoicePlaying && voiceStatus !== "paused" && !isVoiceLoading && <button className="voice-talk" type="button" onClick={replayVoice} disabled={!isVoiceEnabled}>تشغيل الصوت</button>}<span className={`voice-status ${isVoicePlaying ? "voice-status-speaking" : ""}`}>{voiceError || (!isVoiceEnabled ? "الصوت متوقف" : isVoiceLoading ? "جاري تجهيز الصوت..." : voiceStatus === "paused" ? "متوقف" : isVoicePlaying ? "يقرأ الآن" : voiceStatus === "ready" ? "الصوت جاهز" : "بانتظار الإجابة")}</span></div></div>
+            <div className="panel-heading"><div><p className="section-kicker">أسئلة خاصة</p><h2>اسأل المدرس</h2></div><div className="voice-controls"><button className={`voice-toggle ${isVoiceEnabled ? "is-active" : ""}`} type="button" onClick={toggleVoice} disabled={!canWork || isVoiceLoading}>{isVoiceEnabled ? "الصوت مفعّل" : "الصوت متوقف"}</button>{isVoicePlaying && <button className="voice-talk" type="button" onClick={pauseVoice}>إيقاف مؤقت</button>}{voiceStatus === "paused" && <button className="voice-talk" type="button" onClick={resumeVoice}>متابعة الصوت</button>}{voiceSegments.length > 0 && !isVoicePlaying && voiceStatus !== "paused" && !isVoiceLoading && <button className="voice-talk" type="button" onClick={replayVoice} disabled={!isVoiceEnabled}>تشغيل الصوت</button>}<span className={`voice-status ${isVoicePlaying ? "voice-status-speaking" : ""}`}>{voiceError || (!isVoiceEnabled ? "الصوت متوقف" : isVoiceLoading ? "جاري تجهيز الصوت..." : voiceStatus === "paused" ? "متوقف" : isVoicePlaying ? "يقرأ الآن" : voiceStatus === "ready" ? "الصوت جاهز" : "بانتظار الإجابة")}</span></div></div>
             <div className="messages-area" aria-live="polite">
-              {!messages.length && <div className="empty-chat"><div className="empty-icon"><IconMessageCircle size={24} /></div><h3>اسأل المدرس عن أي شيء</h3><p>{canWork ? "اكتب سؤالك في الأسفل، وسأجيبك من محتوى الكتاب." : "اختر كتابًا لتبدأ المحادثة."}</p></div>}
-              {messages.map((message, index) => <article key={`${message.created_at}-${index}`} className={`message ${message.role === "user" ? "user-message" : "assistant-message"}`}><div className="message-avatar">{message.role === "user" ? <IconUser size={16} /> : <IconBook2 size={16} />}</div><div className="message-body"><span className="message-role">{message.role === "user" ? "الطالب" : "المدرس"}</span>{message.role === "assistant" ? <div ref={teacherMarkdownRef} className="teacher-markdown" onClick={handleTeacherMarkdownClick}><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{renderTeacherMarkdown(message.content)}</ReactMarkdown></div> : <p>{message.content}</p>}{message.sources?.length ? <div className="sources"><span>المصادر</span>{message.sources.map((source, sourceIndex) => <small key={sourceIndex}>صفحة {source.page || source.page_number || "—"}{source.title ? ` · ${source.title}` : ""}</small>)}</div> : null}</div></article>)}
+              {!messages.length && <div className="empty-chat"><div className="empty-icon"><IconMessageCircle size={24} /></div><h3>اسأل المدرس عن سؤال خاص</h3><p>{canWork ? "اكتب سؤالًا جديدًا، وسأبحث عن إجابته من محتوى الكتاب." : "اختر كتابًا لتبدأ."}</p></div>}
+              {messages.map((message, index) => <article key={`${message.created_at}-${index}`} className={`message ${message.role === "user" ? "user-message" : "assistant-message"}`}><div className="message-avatar">{message.role === "user" ? <IconUser size={16} /> : <IconBook2 size={16} />}</div><div className="message-body"><span className="message-role">{message.role === "user" ? "الطالب" : "المدرس"}</span>{message.role === "assistant" ? <div ref={voiceContentTarget === "chat" ? teacherMarkdownRef : undefined} className="teacher-markdown" onClick={handleTeacherMarkdownClick}><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{renderTeacherMarkdown(message.content)}</ReactMarkdown></div> : <p>{message.content}</p>}{message.sources?.length ? <div className="sources"><span>المصادر</span>{message.sources.map((source, sourceIndex) => <small key={sourceIndex}>صفحة {source.page || source.page_number || "—"}{source.title ? ` · ${source.title}` : ""}</small>)}</div> : null}</div></article>)}
               {isAsking && <div className="thinking"><span className="status-dot" /> المدرس يكتب...</div>}
               <div ref={messagesEndRef} />
             </div>
