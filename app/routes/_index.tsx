@@ -693,6 +693,7 @@ export default function HomeRoute() {
     sectionId,
     conversationId: responseConversationId,
     messageId,
+    explanationCacheId: responseExplanationCacheId,
     enabled = true,
   }: {
     text: string;
@@ -700,6 +701,7 @@ export default function HomeRoute() {
     sectionId: string;
     conversationId?: string | null;
     messageId?: string | null;
+    explanationCacheId?: string | null;
     enabled?: boolean;
   }) => {
     console.log("[frontend] generateTeacherVoice CALLED", {
@@ -708,6 +710,7 @@ export default function HomeRoute() {
       sectionId,
       conversationId: responseConversationId,
       messageId,
+      explanationCacheId: responseExplanationCacheId,
       isVoiceEnabled,
     });
 
@@ -730,6 +733,7 @@ export default function HomeRoute() {
         sectionId,
         conversationId: responseConversationId,
         messageId,
+        explanationCacheId: responseExplanationCacheId,
         enabled,
         mode: "sync",
         cache: true,
@@ -749,6 +753,7 @@ export default function HomeRoute() {
           section_id: sectionId,
           conversation_id: responseConversationId || null,
           message_id: messageId || null,
+          explanation_cache_id: responseExplanationCacheId || null,
           enabled,
           sync: true,
           cache: true,
@@ -936,6 +941,8 @@ export default function HomeRoute() {
       let accumulatedText = "";
       let finalSources: Source[] = [];
       let finalConversationId = conversationId;
+      let finalExplanationCacheId: string | null = null;
+      let finalExplanationCached = false;
       let streamError = "";
 
       const conversationHistory = [
@@ -986,6 +993,20 @@ export default function HomeRoute() {
         const eventMessageId = extractAssistantMessageId(event);
         if (eventMessageId) {
           assistantMessageId = eventMessageId;
+        }
+
+        const eventExplanationCacheId = extractExplanationCacheId(event);
+        if (eventExplanationCacheId) {
+          finalExplanationCacheId = eventExplanationCacheId;
+        }
+
+        const eventExplanationCached = extractBooleanField(event, [
+          "explanation_cached",
+          "cache_hit",
+          "cached",
+        ]);
+        if (eventExplanationCached === true) {
+          finalExplanationCached = true;
         }
 
         if (typeof event.error === "string") {
@@ -1080,6 +1101,8 @@ export default function HomeRoute() {
         patchAssistant({
           content: accumulatedText,
           sources: finalSources,
+          explanation_cache_id: finalExplanationCacheId,
+          explanation_cached: finalExplanationCached,
         });
 
         console.log("[frontend] BEFORE TEACHER VOICE", {
@@ -1088,6 +1111,7 @@ export default function HomeRoute() {
           selectedSectionId,
           finalConversationId,
           assistantMessageId,
+          explanationCacheId: finalExplanationCacheId,
           accumulatedTextLength: accumulatedText.length,
         });
 
@@ -1103,6 +1127,7 @@ export default function HomeRoute() {
               messageId: assistantMessageId,
               conversationId: finalConversationId,
               sectionId: selectedSectionId,
+              explanationCacheId: finalExplanationCacheId,
             });
             await generateTeacherVoice({
               text: accumulatedText,
@@ -1110,6 +1135,7 @@ export default function HomeRoute() {
               sectionId: selectedSectionId,
               conversationId: finalConversationId,
               messageId: assistantMessageId,
+              explanationCacheId: finalExplanationCacheId,
               enabled: isVoiceEnabled,
             });
           } catch (voiceError) {
